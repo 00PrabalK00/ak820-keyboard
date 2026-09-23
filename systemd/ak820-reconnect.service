@@ -1,0 +1,12 @@
+[Unit]
+Description=AK820 Bluetooth reconnect watchdog
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/ak820-control/ak820_reconnect.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
