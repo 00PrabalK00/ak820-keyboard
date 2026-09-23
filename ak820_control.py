@@ -1,16 +1,8 @@
 #!/usr/bin/env python3
-"""AK820 Linux Control.
-
-Small Linux control panel for AJAZZ AK820-series Bluetooth keyboards.
-Uses BlueZ bluetoothctl and systemd --user. No third-party Python packages.
-"""
+"""AK820 Linux Control — polished BlueZ dashboard for AJAZZ AK820 keyboards."""
 
 from __future__ import annotations
 
-import json
-import pathlib
-import re
-import subprocess
 import threading
 import time
 import tkinter as tk
@@ -18,104 +10,35 @@ from collections import deque
 from datetime import datetime
 from tkinter import messagebox, ttk
 
+from ak820_core import (
+    SERVICE_NAME, adapter_address, adapter_power_control, bt, detect_ak820,
+    parse_info, read_config, run, self_tests, service_state, timed_connect,
+    write_config,
+)
+
 APP_NAME = "AK820 Linux Control"
-CONFIG_DIR = pathlib.Path.home() / ".config" / "ak820-control"
-CONFIG_FILE = CONFIG_DIR / "config.json"
-SERVICE_NAME = "ak820-reconnect.service"
-POLL_MS = 500
+POLL_MS = 1000
 
-
-def run(cmd: list[str], timeout: float = 10) -> tuple[int, str]:
-    try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
-    except FileNotFoundError:
-        return 127, f"Command not found: {cmd[0]}"
-    except subprocess.TimeoutExpired:
-        return 124, f"Timed out: {' '.join(cmd)}"
-
-
-def bt(*args: str, timeout: float = 10) -> tuple[int, str]:
-    return run(["bluetoothctl", *args], timeout=timeout)
-
-
-def parse_info(text: str) -> dict[str, str]:
-    data: dict[str, str] = {}
-    for line in text.splitlines():
-        s = line.strip()
-        if ":" in s:
-            key, value = s.split(":", 1)
-            data[key.strip()] = value.strip()
-    return data
-
-
-def detect_ak820() -> tuple[str | None, str | None]:
-    commands = [("devices", "Paired"), ("paired-devices",), ("devices",)]
-    seen: set[str] = set()
-    for command in commands:
-        rc, out = bt(*command)
-        if rc not in (0, 1):
-            continue
-        for line in out.splitlines():
-            m = re.search(r"Device\s+([0-9A-Fa-f:]{17})\s+(.+)$", line.strip())
-            if not m:
-                continue
-            mac, name = m.group(1).upper(), m.group(2).strip()
-            if mac in seen:
-                continue
-            seen.add(mac)
-            if "AK820" in name.upper():
-                return mac, name
-    return None, None
-
-
-def read_config() -> dict:
-    try:
-        return json.loads(CONFIG_FILE.read_text())
-    except Exception:
-        return {}
-
-
-def write_config(mac: str, name: str = "AK820") -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps({"mac": mac.upper(), "name": name}, indent=2) + "\n")
-
-
-def service_state() -> tuple[str, str]:
-    _, active = run(["systemctl", "--user", "is-active", SERVICE_NAME], timeout=3)
-    _, enabled = run(["systemctl", "--user", "is-enabled", SERVICE_NAME], timeout=3)
-    return (
-        active.splitlines()[0] if active else "unknown",
-        enabled.splitlines()[0] if enabled else "unknown",
-    )
-
-
-def adapter_power_control() -> tuple[str, str]:
-    hci = pathlib.Path("/sys/class/bluetooth/hci0/device")
-    try:
-        device = hci.resolve()
-    except Exception:
-        return "unknown", ""
-
-    candidates = [device, device.parent, *list(device.parents)[:4]]
-    for p in candidates:
-        control = p / "power" / "control"
-        vendor = p / "idVendor"
-        if control.exists() and (vendor.exists() or p == device):
-            try:
-                return control.read_text().strip(), str(control)
-            except Exception:
-                pass
-    return "unknown", ""
+BG = "#0b1020"
+PANEL = "#121a2e"
+PANEL_2 = "#18223a"
+TEXT = "#e8eefc"
+MUTED = "#8ea0c2"
+ACCENT = "#65d1ff"
+GOOD = "#6ee7a8"
+WARN = "#ffd166"
+BAD = "#ff6b81"
 
 
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("760x590")
-        self.minsize(700, 520)
+        self.geometry("920x690")
+        self.minsize(820, 610)
+        self.configure(bg=BG)
 
+        self._style()
         cfg = read_config()
         self.mac = str(cfg.get("mac", "")).upper()
         self.device_name = str(cfg.get("name", "AK820"))
@@ -130,104 +53,175 @@ class App(tk.Tk):
         self.reconnect_samples: deque[float] = deque(maxlen=50)
         self.busy = False
 
-        self.status_var = tk.StringVar(value="Checking…")
         self.device_var = tk.StringVar(value=self.device_name)
         self.mac_var = tk.StringVar(value=self.mac or "Not detected")
+        self.connection_var = tk.StringVar(value="CHECKING")
         self.paired_var = tk.StringVar(value="—")
         self.trusted_var = tk.StringVar(value="—")
-        self.connected_var = tk.StringVar(value="—")
         self.battery_var = tk.StringVar(value="—")
-        self.adapter_var = tk.StringVar(value="—")
+        self.power_var = tk.StringVar(value="—")
         self.service_var = tk.StringVar(value="—")
-        self.reconnect_var = tk.StringVar(value="No samples yet")
+        self.adapter_var = tk.StringVar(value="—")
+        self.reconnect_var = tk.StringVar(value="No reconnect samples yet")
+        self.test_summary_var = tk.StringVar(value="Run the health check to test the stack.")
+        self.connect_time_var = tk.StringVar(value="Not measured")
 
-        self._build_ui()
+        self._build()
         self.after(100, self.refresh_async)
         self.after(POLL_MS, self._poll)
 
-    def _build_ui(self) -> None:
-        root = ttk.Frame(self, padding=18)
-        root.pack(fill="both", expand=True)
+    def _style(self) -> None:
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure(".", background=BG, foreground=TEXT, fieldbackground=PANEL, borderwidth=0)
+        style.configure("TFrame", background=BG)
+        style.configure("Panel.TFrame", background=PANEL)
+        style.configure("Card.TFrame", background=PANEL_2)
+        style.configure("TLabel", background=BG, foreground=TEXT)
+        style.configure("Panel.TLabel", background=PANEL, foreground=TEXT)
+        style.configure("Card.TLabel", background=PANEL_2, foreground=TEXT)
+        style.configure("Muted.TLabel", background=BG, foreground=MUTED)
+        style.configure("PanelMuted.TLabel", background=PANEL, foreground=MUTED)
+        style.configure("Title.TLabel", background=BG, foreground=TEXT, font=("Sans", 24, "bold"))
+        style.configure("Hero.TLabel", background=PANEL, foreground=TEXT, font=("Sans", 18, "bold"))
+        style.configure("Metric.TLabel", background=PANEL_2, foreground=ACCENT, font=("Sans", 17, "bold"))
+        style.configure("Good.TLabel", background=PANEL, foreground=GOOD, font=("Sans", 11, "bold"))
+        style.configure("Bad.TLabel", background=PANEL, foreground=BAD, font=("Sans", 11, "bold"))
+        style.configure("TButton", background=PANEL_2, foreground=TEXT, padding=(14, 9), font=("Sans", 10, "bold"))
+        style.map("TButton", background=[("active", "#243252")])
+        style.configure("Accent.TButton", background=ACCENT, foreground="#06101a")
+        style.map("Accent.TButton", background=[("active", "#8de0ff")])
+        style.configure("TNotebook", background=BG, borderwidth=0)
+        style.configure("TNotebook.Tab", background=PANEL, foreground=MUTED, padding=(18, 10))
+        style.map("TNotebook.Tab", background=[("selected", PANEL_2)], foreground=[("selected", TEXT)])
+        style.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=TEXT, rowheight=30)
+        style.configure("Treeview.Heading", background=PANEL_2, foreground=TEXT, font=("Sans", 10, "bold"))
+        style.map("Treeview", background=[("selected", "#26385d")])
 
-        header = ttk.Frame(root)
-        header.pack(fill="x")
-        ttk.Label(header, text=APP_NAME, font=("TkDefaultFont", 20, "bold")).pack(side="left")
-        ttk.Label(header, textvariable=self.status_var, font=("TkDefaultFont", 11, "bold")).pack(side="right")
+    def _build(self) -> None:
+        shell = ttk.Frame(self, padding=(22, 18))
+        shell.pack(fill="both", expand=True)
+
+        top = ttk.Frame(shell)
+        top.pack(fill="x")
+        ttk.Label(top, text="AK820 // CONTROL", style="Title.TLabel").pack(side="left")
+        ttk.Label(top, text="Linux · BlueZ", style="Muted.TLabel").pack(side="right", pady=(8, 0))
+
         ttk.Label(
-            root,
-            text="Bluetooth connection, persistence and reconnect diagnostics for AJAZZ AK820 keyboards.",
-        ).pack(anchor="w", pady=(4, 16))
+            shell,
+            text="Connection control, persistence, diagnostics and live recovery telemetry.",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(2, 14))
 
-        device = ttk.LabelFrame(root, text="Keyboard", padding=12)
-        device.pack(fill="x")
-        grid = ttk.Frame(device)
-        grid.pack(fill="x")
+        notebook = ttk.Notebook(shell)
+        notebook.pack(fill="both", expand=True)
+        dash = ttk.Frame(notebook, padding=(2, 14))
+        diag = ttk.Frame(notebook, padding=(2, 14))
+        tests = ttk.Frame(notebook, padding=(2, 14))
+        notebook.add(dash, text="Dashboard")
+        notebook.add(diag, text="Diagnostics")
+        notebook.add(tests, text="Health Tests")
 
-        rows = [
-            ("Device", self.device_var),
-            ("MAC", self.mac_var),
-            ("Paired", self.paired_var),
-            ("Trusted", self.trusted_var),
-            ("Connected", self.connected_var),
-            ("Battery", self.battery_var),
-        ]
-        for i, (label, var) in enumerate(rows):
-            ttk.Label(grid, text=label + ":", width=13).grid(
-                row=i // 2, column=(i % 2) * 2, sticky="w", padx=(0, 6), pady=3
-            )
-            ttk.Label(grid, textvariable=var, width=25).grid(
-                row=i // 2, column=(i % 2) * 2 + 1, sticky="w", pady=3
-            )
-        grid.columnconfigure(1, weight=1)
-        grid.columnconfigure(3, weight=1)
+        self._build_dashboard(dash)
+        self._build_diagnostics(diag)
+        self._build_tests(tests)
 
-        buttons = ttk.Frame(device)
-        buttons.pack(fill="x", pady=(12, 0))
-        ttk.Button(buttons, text="Connect", command=lambda: self.action("connect")).pack(side="left", padx=(0, 8))
+    def _card(self, parent, title: str, var: tk.StringVar, col: int) -> None:
+        card = ttk.Frame(parent, style="Card.TFrame", padding=14)
+        card.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 6, 6 if col < 3 else 0))
+        ttk.Label(card, text=title.upper(), style="Card.TLabel", foreground=MUTED).pack(anchor="w")
+        ttk.Label(card, textvariable=var, style="Metric.TLabel").pack(anchor="w", pady=(5, 0))
+        parent.columnconfigure(col, weight=1)
+
+    def _build_dashboard(self, root) -> None:
+        hero = ttk.Frame(root, style="Panel.TFrame", padding=18)
+        hero.pack(fill="x")
+        left = ttk.Frame(hero, style="Panel.TFrame")
+        left.pack(side="left", fill="x", expand=True)
+        ttk.Label(left, textvariable=self.device_var, style="Hero.TLabel").pack(anchor="w")
+        ttk.Label(left, textvariable=self.mac_var, style="PanelMuted.TLabel").pack(anchor="w", pady=(3, 0))
+        self.state_label = ttk.Label(hero, textvariable=self.connection_var, style="Good.TLabel")
+        self.state_label.pack(side="right", padx=(12, 0))
+
+        buttons = ttk.Frame(root)
+        buttons.pack(fill="x", pady=(12, 12))
+        ttk.Button(buttons, text="Connect", style="Accent.TButton", command=lambda: self.action("connect")).pack(side="left", padx=(0, 8))
         ttk.Button(buttons, text="Disconnect", command=lambda: self.action("disconnect")).pack(side="left", padx=(0, 8))
         ttk.Button(buttons, text="Trust", command=lambda: self.action("trust")).pack(side="left", padx=(0, 8))
-        ttk.Button(buttons, text="Detect AK820", command=self.detect_async).pack(side="left", padx=(0, 8))
+        ttk.Button(buttons, text="Detect keyboard", command=self.detect_async).pack(side="left")
         ttk.Button(buttons, text="Refresh", command=self.refresh_async).pack(side="right")
 
-        persistence = ttk.LabelFrame(root, text="Persistence", padding=12)
-        persistence.pack(fill="x", pady=(12, 0))
-        ttk.Label(persistence, text="USB adapter power:").grid(row=0, column=0, sticky="w")
-        ttk.Label(persistence, textvariable=self.adapter_var).grid(row=0, column=1, sticky="w", padx=(8, 24))
-        ttk.Label(persistence, text="Reconnect service:").grid(row=0, column=2, sticky="w")
-        ttk.Label(persistence, textvariable=self.service_var).grid(row=0, column=3, sticky="w", padx=(8, 0))
-        persistence.columnconfigure(3, weight=1)
+        metrics = ttk.Frame(root)
+        metrics.pack(fill="x", pady=(0, 12))
+        self._card(metrics, "Paired", self.paired_var, 0)
+        self._card(metrics, "Trusted", self.trusted_var, 1)
+        self._card(metrics, "Battery", self.battery_var, 2)
+        self._card(metrics, "USB Power", self.power_var, 3)
 
-        svc = ttk.Frame(persistence)
-        svc.grid(row=1, column=0, columnspan=4, sticky="w", pady=(10, 0))
-        ttk.Button(
-            svc,
-            text="Enable persistent reconnect",
-            command=lambda: self.service_action("enable"),
-        ).pack(side="left", padx=(0, 8))
-        ttk.Button(
-            svc,
-            text="Disable service",
-            command=lambda: self.service_action("disable"),
-        ).pack(side="left")
+        persistence = ttk.Frame(root, style="Panel.TFrame", padding=16)
+        persistence.pack(fill="x")
+        ttk.Label(persistence, text="Persistent reconnect", style="Hero.TLabel", font=("Sans", 13, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(persistence, textvariable=self.service_var, style="PanelMuted.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Button(persistence, text="Enable watchdog", command=lambda: self.service_action(True)).grid(row=0, column=1, rowspan=2, padx=(18, 8))
+        ttk.Button(persistence, text="Disable", command=lambda: self.service_action(False)).grid(row=0, column=2, rowspan=2)
+        persistence.columnconfigure(0, weight=1)
 
-        diag = ttk.LabelFrame(root, text="Reconnect timing", padding=12)
-        diag.pack(fill="x", pady=(12, 0))
-        ttk.Label(diag, textvariable=self.reconnect_var).pack(anchor="w")
+        timing = ttk.Frame(root, style="Panel.TFrame", padding=16)
+        timing.pack(fill="x", pady=(12, 0))
+        ttk.Label(timing, text="Recovery telemetry", style="Hero.TLabel", font=("Sans", 13, "bold")).pack(anchor="w")
+        ttk.Label(timing, textvariable=self.reconnect_var, style="PanelMuted.TLabel").pack(anchor="w", pady=(5, 0))
+
+    def _build_diagnostics(self, root) -> None:
+        row = ttk.Frame(root, style="Panel.TFrame", padding=16)
+        row.pack(fill="x")
+        for label, var in [
+            ("Adapter", self.adapter_var),
+            ("Connect command", self.connect_time_var),
+        ]:
+            box = ttk.Frame(row, style="Panel.TFrame")
+            box.pack(side="left", fill="x", expand=True)
+            ttk.Label(box, text=label.upper(), style="PanelMuted.TLabel").pack(anchor="w")
+            ttk.Label(box, textvariable=var, style="Panel.TLabel", font=("Sans", 12, "bold")).pack(anchor="w", pady=(3, 0))
+
+        actions = ttk.Frame(root)
+        actions.pack(fill="x", pady=(12, 12))
+        ttk.Button(actions, text="Measure connect time", style="Accent.TButton", command=self.measure_connect_async).pack(side="left")
         ttk.Label(
-            diag,
-            text="Observed from Linux seeing the link drop until Connected returns. This is not physical keypress latency.",
-        ).pack(anchor="w", pady=(4, 0))
+            actions,
+            text="Measures BlueZ connect-command completion, not physical keypress latency.",
+            style="Muted.TLabel",
+        ).pack(side="left", padx=(12, 0))
 
-        log_frame = ttk.LabelFrame(root, text="Live log", padding=8)
-        log_frame.pack(fill="both", expand=True, pady=(12, 0))
-        self.log = tk.Text(log_frame, height=10, wrap="word", state="disabled")
+        logbox = ttk.Frame(root, style="Panel.TFrame", padding=10)
+        logbox.pack(fill="both", expand=True)
+        self.log = tk.Text(
+            logbox, bg=PANEL, fg=TEXT, insertbackground=TEXT, relief="flat",
+            font=("Monospace", 10), padx=8, pady=8, wrap="word", state="disabled",
+        )
         self.log.pack(side="left", fill="both", expand=True)
-        scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log.yview)
+        scroll = ttk.Scrollbar(logbox, command=self.log.yview)
         scroll.pack(side="right", fill="y")
         self.log.configure(yscrollcommand=scroll.set)
-        self._log("Ready")
+        self._log("Dashboard ready")
+
+    def _build_tests(self, root) -> None:
+        header = ttk.Frame(root)
+        header.pack(fill="x", pady=(0, 10))
+        ttk.Label(header, textvariable=self.test_summary_var, style="Muted.TLabel").pack(side="left")
+        ttk.Button(header, text="Run all tests", style="Accent.TButton", command=self.run_tests_async).pack(side="right")
+
+        self.test_tree = ttk.Treeview(root, columns=("result", "detail"), show="headings")
+        self.test_tree.heading("result", text="Result")
+        self.test_tree.heading("detail", text="Check / detail")
+        self.test_tree.column("result", width=100, stretch=False)
+        self.test_tree.column("detail", width=650)
+        self.test_tree.pack(fill="both", expand=True)
+        self.test_tree.tag_configure("pass", foreground=GOOD)
+        self.test_tree.tag_configure("fail", foreground=BAD)
 
     def _log(self, msg: str) -> None:
+        if not hasattr(self, "log"):
+            return
         stamp = datetime.now().strftime("%H:%M:%S")
         self.log.configure(state="normal")
         self.log.insert("end", f"[{stamp}] {msg}\n")
@@ -237,35 +231,30 @@ class App(tk.Tk):
     def _require_mac(self) -> bool:
         if self.mac:
             return True
-        messagebox.showwarning(
-            APP_NAME,
-            "No AK820 was detected. Pair it first, then click Detect AK820.",
-        )
+        messagebox.showwarning(APP_NAME, "No AK820 detected. Pair it first, then use Detect keyboard.")
         return False
 
     def detect_async(self) -> None:
         if self.busy:
             return
         self.busy = True
-        self._log("Searching BlueZ for an AK820…")
-
-        def worker() -> None:
+        self._log("Scanning BlueZ for AK820…")
+        def worker():
             mac, name = detect_ak820()
             self.after(0, lambda: self._finish_detect(mac, name))
-
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_detect(self, mac: str | None, name: str | None) -> None:
+    def _finish_detect(self, mac, name) -> None:
         self.busy = False
         if not mac:
-            self._log("No AK820 found")
-            messagebox.showinfo(APP_NAME, "No paired AK820 was found by BlueZ.")
+            self._log("No paired AK820 found")
+            messagebox.showinfo(APP_NAME, "No paired AK820 was found.")
             return
         self.mac, self.device_name = mac, name or "AK820"
         write_config(self.mac, self.device_name)
         self.mac_var.set(self.mac)
         self.device_var.set(self.device_name)
-        self._log(f"Detected {self.device_name} at {self.mac}")
+        self._log(f"Detected {self.device_name} · {self.mac}")
         self.refresh_async()
 
     def action(self, op: str) -> None:
@@ -273,91 +262,100 @@ class App(tk.Tk):
             return
         self.busy = True
         self._log(f"{op.capitalize()} requested")
-
-        def worker() -> None:
+        def worker():
             start = time.monotonic()
             rc, out = bt(op, self.mac, timeout=15)
-            elapsed = (time.monotonic() - start) * 1000
-            self.after(0, lambda: self._finish_action(op, rc, out, elapsed))
-
+            ms = (time.monotonic() - start) * 1000
+            self.after(0, lambda: self._finish_action(op, rc, out, ms))
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_action(self, op: str, rc: int, out: str, elapsed_ms: float) -> None:
+    def _finish_action(self, op, rc, out, ms) -> None:
         self.busy = False
         summary = out.splitlines()[-1] if out else f"exit {rc}"
-        self._log(f"{op.capitalize()}: {summary} ({elapsed_ms:.0f} ms)")
+        self._log(f"{op.capitalize()}: {summary} · {ms:.0f} ms")
         if rc != 0 and "successful" not in out.lower() and "succeeded" not in out.lower():
             messagebox.showerror(APP_NAME, out or f"{op} failed")
         self.refresh_async()
 
-    def service_action(self, op: str) -> None:
+    def service_action(self, enable: bool) -> None:
         if not self._require_mac():
             return
         write_config(self.mac, self.device_name)
-        cmd = (
-            ["systemctl", "--user", "enable", "--now", SERVICE_NAME]
-            if op == "enable"
-            else ["systemctl", "--user", "disable", "--now", SERVICE_NAME]
-        )
-        rc, out = run(cmd, timeout=10)
-        if rc == 0:
-            self._log(f"Reconnect service {op}d")
-        else:
-            self._log(out)
-            messagebox.showerror(APP_NAME, out or "systemd operation failed. Run install.sh first.")
+        args = ["systemctl", "--user", "enable" if enable else "disable", "--now", SERVICE_NAME]
+        rc, out = run(args, timeout=10)
+        self._log(("Enabled" if enable else "Disabled") + " reconnect watchdog" if rc == 0 else out)
         self.refresh_async()
+
+    def measure_connect_async(self) -> None:
+        if not self._require_mac():
+            return
+        self.connect_time_var.set("Measuring…")
+        def worker():
+            ok, ms, out = timed_connect(self.mac)
+            self.after(0, lambda: self._finish_measure(ok, ms, out))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_measure(self, ok, ms, out) -> None:
+        self.connect_time_var.set(f"{ms:.1f} ms" + ("" if ok else " · failed"))
+        self._log(f"Connect timing: {ms:.1f} ms · {'PASS' if ok else 'FAIL'}")
+
+    def run_tests_async(self) -> None:
+        self.test_summary_var.set("Running host health checks…")
+        for item in self.test_tree.get_children():
+            self.test_tree.delete(item)
+        def worker():
+            checks = self_tests(self.mac)
+            self.after(0, lambda: self._finish_tests(checks))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_tests(self, checks) -> None:
+        passed = sum(c.ok for c in checks)
+        for c in checks:
+            self.test_tree.insert("", "end", values=("PASS" if c.ok else "FAIL", f"{c.name} — {c.detail}"), tags=("pass" if c.ok else "fail",))
+        self.test_summary_var.set(f"{passed}/{len(checks)} checks passed")
+        self._log(f"Health tests complete: {passed}/{len(checks)} passed")
 
     def refresh_async(self) -> None:
         if not self.mac:
-            self.status_var.set("No device")
+            self.connection_var.set("NO DEVICE")
             return
-
-        def worker() -> None:
+        def worker():
             _, out = bt("info", self.mac, timeout=4)
             data = parse_info(out)
-            pwr, pwr_path = adapter_power_control()
+            power, _ = adapter_power_control()
             active, enabled = service_state()
-            self.after(0, lambda: self._apply_status(data, pwr, pwr_path, active, enabled))
-
+            addr = adapter_address()
+            self.after(0, lambda: self._apply_status(data, power, active, enabled, addr))
         threading.Thread(target=worker, daemon=True).start()
 
-    def _apply_status(
-        self,
-        data: dict[str, str],
-        pwr: str,
-        pwr_path: str,
-        active: str,
-        enabled: str,
-    ) -> None:
-        paired = data.get("Paired", "unknown")
-        trusted = data.get("Trusted", "unknown")
+    def _apply_status(self, data, power, active, enabled, addr) -> None:
         connected = data.get("Connected", "unknown")
-        battery = data.get("Battery Percentage", data.get("Percentage", "unavailable"))
-
-        self.paired_var.set(paired)
-        self.trusted_var.set(trusted)
-        self.connected_var.set(connected)
-        self.battery_var.set(battery)
-        self.adapter_var.set(pwr + (" (autosuspend blocked)" if pwr == "on" else ""))
-        self.service_var.set(f"{active}, {enabled}")
-        self.status_var.set("Connected" if connected == "yes" else "Disconnected")
+        self.paired_var.set(data.get("Paired", "unknown").upper())
+        self.trusted_var.set(data.get("Trusted", "unknown").upper())
+        self.battery_var.set(data.get("Battery Percentage", data.get("Percentage", "N/A")))
+        self.power_var.set(power.upper())
+        self.adapter_var.set(f"hci0 · {addr}")
+        self.service_var.set(f"{active} · {enabled} · checks every 3 s")
+        self.connection_var.set("CONNECTED" if connected == "yes" else "DISCONNECTED")
+        self.state_label.configure(style="Good.TLabel" if connected == "yes" else "Bad.TLabel")
 
         now_connected = connected == "yes"
         if self.last_connected is None:
             self.last_connected = now_connected
         elif self.last_connected and not now_connected:
             self.disconnect_started = time.monotonic()
-            self._log("Bluetooth link disconnected")
             self.last_connected = False
+            self._log("Bluetooth link dropped")
         elif not self.last_connected and now_connected:
             if self.disconnect_started is not None:
                 elapsed = time.monotonic() - self.disconnect_started
                 self.reconnect_samples.append(elapsed)
                 avg = sum(self.reconnect_samples) / len(self.reconnect_samples)
+                best = min(self.reconnect_samples)
                 self.reconnect_var.set(
-                    f"Last reconnect: {elapsed:.2f} s   Average: {avg:.2f} s   Samples: {len(self.reconnect_samples)}"
+                    f"Last {elapsed:.2f} s   ·   Avg {avg:.2f} s   ·   Best {best:.2f} s   ·   n={len(self.reconnect_samples)}"
                 )
-                self._log(f"Bluetooth link restored after {elapsed:.2f} s")
+                self._log(f"Link restored in {elapsed:.2f} s")
             self.disconnect_started = None
             self.last_connected = True
 
