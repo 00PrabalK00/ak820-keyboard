@@ -12,7 +12,7 @@ command -v bluetoothctl >/dev/null || { echo "bluetoothctl is required. Install 
 command -v python3 >/dev/null || { echo "python3 is required."; exit 1; }
 
 mkdir -p "$APP_DIR" "$BIN_DIR" "$UNIT_DIR" "$APP_MENU_DIR" "$CONFIG_DIR"
-install -m 0755 "$ROOT/ak820_control.py" "$APP_DIR/ak820_control.py"
+install -m 0755 "$ROOT/ak820_control.py" "$APP_DIR/ak820_control.py"\ninstall -m 0644 "$ROOT/ak820_core.py" "$APP_DIR/ak820_core.py"
 install -m 0755 "$ROOT/ak820_reconnect.py" "$APP_DIR/ak820_reconnect.py"
 install -m 0644 "$ROOT/systemd/ak820-reconnect.service" "$UNIT_DIR/ak820-reconnect.service"
 
