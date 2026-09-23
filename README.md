@@ -1,61 +1,80 @@
 # AK820 Linux Control
 
-A lightweight Linux control panel for AJAZZ AK820-series Bluetooth keyboards.
+A polished Linux control center for AJAZZ AK820-series Bluetooth keyboards, built on BlueZ.
 
-AJAZZ currently publishes the AK820 Max vendor driver for Windows only. This project fills the Linux gap for the part that is safe and well-supported through BlueZ: connection state, trust, persistent reconnect and reconnect diagnostics.
+## What you get
 
-## Features
-
-* Auto-detects paired AK820 keyboards
-* Shows paired, trusted, connected and battery state when BlueZ exposes it
-* One-click connect, disconnect and trust
-* Persistent 3 second reconnect watchdog using a user-level systemd service
-* Shows Bluetooth USB runtime power state so adapter autosuspend issues are visible
-* Measures observed disconnect-to-reconnect time
-* Live event log
-* No Python packages required beyond Tkinter and the standard library
-
-## Important limitation
-
-Bluetooth mode exposes the normal HID keyboard interfaces but vendor RGB/configuration commands are not reliably available over Bluetooth on the AK820 Max. This app deliberately does not send undocumented vendor HID writes. Wired RGB/keymap support can be added after validating the exact USB revision and protocol.
+- Dark desktop dashboard with live connection state
+- Auto-detection of paired AK820 keyboards
+- Pair/trust/connect status and battery state when exposed by BlueZ
+- One-click connect, disconnect and trust
+- Persistent 3-second reconnect watchdog with a user-level systemd service
+- USB Bluetooth adapter autosuspend diagnostics
+- Live disconnect/reconnect telemetry with last, average and best recovery time
+- BlueZ connect-command timing test
+- Built-in **Health Tests** for BlueZ, Bluetooth service, USB power management, pairing, trust, connection and watchdog state
+- Live diagnostic event log
+- Standard-library unit tests and GitHub Actions CI
+- No Python packages beyond Tkinter and the standard library
 
 ## Install on Ubuntu
 
 ```bash
+git clone https://github.com/00PrabalK00/ak820-keyboard.git
+cd ak820-keyboard
 sudo apt install bluez python3-tk
+chmod +x install.sh
 ./install.sh
 ak820-control
 ```
 
-To keep the keyboard reconnecting even when the GUI is closed:
+Enable automatic recovery even when the GUI is closed:
 
 ```bash
 systemctl --user enable --now ak820-reconnect.service
 ```
 
-Check it with:
+## Run tests
 
 ```bash
-systemctl --user status ak820-reconnect.service
+python3 -m unittest discover -s tests -v
 ```
+
+The app also has a **Health Tests** tab for live host-side checks.
+
+## Timing note
+
+The dashboard's connect timing measures how long a BlueZ connect command takes to complete. It is **not** physical keypress-to-screen latency. True input latency requires an external timing reference such as high-speed video or hardware instrumentation.
+
+## RGB / keymap limitation
+
+The Bluetooth interface exposes normal HID functionality, but vendor RGB and keymap commands are not reliably available through the AK820 Max Bluetooth HID interface. This project intentionally avoids undocumented vendor writes that could put a keyboard into a bad state. Wired vendor-protocol support can be added once the exact USB revision/protocol is validated.
 
 ## Configuration
 
-The detected keyboard is stored in:
+Detected keyboard configuration is stored at:
 
 ```text
 ~/.config/ak820-control/config.json
 ```
 
-## Why this exists
+## Project layout
 
-BlueZ exposes connection and trust state through its Device API and supports reconnect behavior for HID devices. AJAZZ's official downloads currently list the AK820 Max driver as Windows-only, so Linux users otherwise have to manage these settings manually.
+```text
+ak820_control.py                 GUI dashboard
+ak820_core.py                    BlueZ + diagnostics helpers
+ak820_reconnect.py               reconnect worker
+systemd/ak820-reconnect.service  user service
+tests/test_core.py               unit tests
+install.sh                       local installer
+uninstall.sh                     uninstaller
+```
 
 ## References
 
-* AJAZZ driver page: https://ajazz.net/pages/ajazz-drivers
-* BlueZ Device API: https://bluez.readthedocs.io/en/latest/device-api/
-* BlueZ Input API: https://bluez.readthedocs.io/en/latest/input-api/
+- AJAZZ drivers: https://ajazz.net/pages/ajazz-drivers
+- BlueZ Device API: https://bluez.readthedocs.io/en/latest/device-api/
+- BlueZ Input API: https://bluez.readthedocs.io/en/latest/input-api/
 
 ## License
 
